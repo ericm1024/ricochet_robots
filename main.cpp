@@ -4,21 +4,23 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <unordered_set>
 
 #include <unistd.h>
 #include <termios.h>
 
-enum class color_t
+enum class color_t : uint8_t
 {
     BLUE,
     RED,
     GREEN,
     YELLOW,
     RAINBOW,
+    INVALID_COLOR,
 };
 using enum color_t;
 
-static char color_to_char(color_t c)
+static char to_char(color_t c)
 {
     switch (c) {
     case BLUE: return 'b';
@@ -26,20 +28,34 @@ static char color_to_char(color_t c)
     case GREEN: return 'g';
     case YELLOW: return 'y';
     case RAINBOW: return 'r';
+    case INVALID_COLOR: assert(false); return 'i';
     }
 }
 
-enum class shape_t
+static char const * to_str(color_t c)
+{
+    switch (c) {
+    case BLUE: return "blue";
+    case RED: return "red";
+    case GREEN: return "green";
+    case YELLOW: return "yellow";
+    case RAINBOW: return "rainbow";
+    case INVALID_COLOR: assert(false); return "invalid_color";
+    }
+}
+
+enum class shape_t : uint8_t
 {
     CRESCENT,
     GEAR,
     PLANET,
     STAR,
     HOLE,
+    INVALID_SHAPE,
 };
 using enum shape_t;
 
-static char shape_to_char(shape_t s)
+static char to_char(shape_t s)
 {
     switch (s) {
     case CRESCENT: return 'c';
@@ -47,10 +63,11 @@ static char shape_to_char(shape_t s)
     case PLANET: return 'p';
     case STAR: return 's';
     case HOLE: return 'h';
+    case INVALID_SHAPE: assert(false); return 'i';
     }
 }
 
-enum class direction_t
+enum class direction_t : uint8_t
 {
     UP,
     DOWN,
@@ -59,7 +76,7 @@ enum class direction_t
 };
 using enum direction_t;
 
-static char const * dir_to_str(direction_t dir)
+static char const * to_str(direction_t dir)
 {
     switch (dir) {
     case UP: return "UP";
@@ -71,18 +88,64 @@ static char const * dir_to_str(direction_t dir)
 
 struct target
 {
+    target() = default;
     target(color_t c, shape_t s) : color{c}, shape{s} {}
 
-    color_t color;
-    shape_t shape;
+    bool operator==(target const &) const = default;
+
+    color_t color = INVALID_COLOR;
+    shape_t shape = INVALID_SHAPE;
 };
+
+namespace std
+{
+    template <> struct hash<target>
+    {
+        size_t operator()(target const & t) const
+        {
+            return static_cast<size_t>(t.color) | (static_cast<size_t>(t.shape) << 8);
+        }
+    };
+}
 
 struct robot
 {
+    bool operator==(robot const &) const = default;
+
     color_t color;
     uint8_t row;
     uint8_t col;
 };
+
+static constexpr size_t k_num_robots = 4;
+
+using robot_array = std::array<robot, k_num_robots>;
+static_assert(sizeof(robot_array) == 12);
+
+// https://stackoverflow.com/a/7666577/3775803
+static size_t hash(unsigned char const * str, size_t len)
+{
+    unsigned char const * end = str + len;
+    size_t hash = 5381;
+
+    while (str != end) {
+        hash = ((hash << 5) + hash) + *str++; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+namespace std
+{
+    template <> struct hash<robot_array>
+    {
+        size_t operator()(robot_array const & r) const
+        {
+            static_assert(std::has_unique_object_representations_v<robot_array>);
+            return ::hash(reinterpret_cast<unsigned char const *>(r.data()), sizeof(r));
+        }
+    };
+}
 
 struct square
 {
@@ -98,26 +161,82 @@ struct square
 static constexpr size_t k_board_width = 16;
 static constexpr size_t k_board_height = 16;
 
+struct move
+{
+    move() = default;
+    move(uint8_t i, direction_t d) : robot_idx{i}, dir{d} {}
+
+    uint8_t robot_idx;
+    direction_t dir;
+};
+
+struct moves_vec
+{
+    moves_vec() = default;
+
+    template <typename ... Ts>
+    void emplace_back(Ts && ... args)
+    {
+        assert(count < std::size(moves));
+        moves[count++] = move(std::forward<Ts>(args)...);
+    }
+
+    void clear()
+    {
+        count = 0;
+    }
+
+    bool empty() const
+    {
+        return count == 0;
+    }
+
+    size_t size() const
+    {
+        return count;
+    }
+
+    move const * begin() const { return moves; }
+    move const * end() const { return moves + count; }
+
+private:
+    move moves[32];
+    size_t count = 0;
+};
+
 struct game_state
 {
     game_state();
     game_state(game_state const &) = default;
 
     void draw();
-
     void move_robot(robot * r, direction_t dir);
+
+    void valid_moves(moves_vec & vec) const;
+
+    bool turn_over() const;
+
+    void play(move mv)
+    {
+        move_robot(&robots[mv.robot_idx], mv.dir);
+    }
+
+    void select_target(std::unordered_set<target> * targets_used = nullptr);
 
 private:
     void init_board();
     void select_starting_squares();
-    bool can_move(robot * r, direction_t dir);
+
+    bool can_move(robot const * r, direction_t dir) const;
     void move_single(robot * r, direction_t dir);
 
     // upper left is 0, 0. First coordinate is row, second is column
     square board[k_board_height][k_board_width];
 
 public:
-    robot robots[4];
+    robot_array robots;
+
+    target target_square;
 };
 
 static std::mt19937 rng{std::random_device{}()};
@@ -222,7 +341,7 @@ void game_state::select_starting_squares()
     std::uniform_int_distribution<unsigned> row_dis(0, k_board_width - 1);
     std::uniform_int_distribution<unsigned> col_dis(0, k_board_height - 1);
 
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < k_num_robots; ++i) {
         while (true) {
             uint8_t row = row_dis(rng);
             uint8_t col = col_dis(rng);
@@ -238,10 +357,33 @@ void game_state::select_starting_squares()
     }
 }
 
+void game_state::select_target(std::unordered_set<target> * targets_used)
+{
+    std::uniform_int_distribution<unsigned> row_dis(0, k_board_width - 1);
+    std::uniform_int_distribution<unsigned> col_dis(0, k_board_height - 1);
+    while (true) {
+        uint8_t row = row_dis(rng);
+        uint8_t col = col_dis(rng);
+
+        square & sq = board[row][col];
+        if (sq.target) {
+            target tg = *sq.target;
+            if (!targets_used || !targets_used->contains(tg)) {
+                target_square = tg;
+                if (targets_used) {
+                    targets_used->insert(tg);
+                }
+                break;
+            }
+        }
+    }
+}
+
 game_state::game_state()
 {
     init_board();
     select_starting_squares();
+    select_target();
 }
 
 void game_state::draw()
@@ -266,12 +408,12 @@ void game_state::draw()
 
             if (sq.robot_idx != -1) {
                 robot * r = &robots[sq.robot_idx];
-                char c = std::toupper(color_to_char(r->color));
+                char c = std::toupper(to_char(r->color));
                 rows[row * 2 + 1][col * 3] = c;
                 rows[row * 2 + 1][col * 3 + 1] = c;
-            } else if (sq.target) {
-                rows[row * 2 + 1][col * 3] = color_to_char(sq.target->color);
-                rows[row * 2 + 1][col * 3 + 1] = shape_to_char(sq.target->shape);
+            } else if (sq.target && *sq.target == target_square) {
+                rows[row * 2 + 1][col * 3] = to_char(sq.target->color);
+                rows[row * 2 + 1][col * 3 + 1] = to_char(sq.target->shape);
             } else if (sq.allowable_starting_square) {
                 rows[row * 2 + 1][col * 3] = '.';
             }
@@ -283,7 +425,7 @@ void game_state::draw()
     }
 }
 
-bool game_state::can_move(robot * r, direction_t dir)
+bool game_state::can_move(robot const * r, direction_t dir) const
 {
     switch (dir) {
     case UP:
@@ -307,7 +449,7 @@ bool game_state::can_move(robot * r, direction_t dir)
 
 void game_state::move_single(robot * r, direction_t dir)
 {
-    int8_t r_idx = r - robots;
+    int8_t r_idx = r - robots.data();
 
     int delta_row = 0;
     int delta_col = 0;
@@ -340,6 +482,34 @@ void game_state::move_robot(robot * r, direction_t dir)
     }
 }
 
+void game_state::valid_moves(moves_vec & vec) const
+{
+    vec.clear();
+
+    for (uint8_t i = 0; i < k_num_robots; ++i) {
+        robot const * r = &robots[i];
+        for (direction_t d : {UP, DOWN, LEFT, RIGHT}) {
+            if (can_move(r, d)) {
+                vec.emplace_back(i, d);
+            }
+        }
+    }
+
+    assert(!vec.empty());
+}
+
+bool game_state::turn_over() const
+{
+    for (robot const & r : robots) {
+        square const & sq = board[r.row][r.col];
+        if (sq.target && *sq.target == target_square &&
+            (sq.target->color == r.color || sq.target->color == RAINBOW)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // from chatgpt
 void set_raw_mode(int fd)
 {
@@ -360,14 +530,13 @@ void reset_mode()
     tcsetattr(STDOUT_FILENO, TCSAFLUSH, &term);
 }
 
-int main()
+static void play_game()
 {
     set_raw_mode(STDOUT_FILENO);
     atexit(reset_mode);
 
     game_state game;
     game.draw();
-
     robot * robot_to_move = &game.robots[0];
 
     int ch;
@@ -395,11 +564,162 @@ int main()
                     exit(1);
                 }
 
-                printf("\n\nmove %s\n\n", dir_to_str(dir));
+                printf("\n\nmove %s\n\n", to_str(dir));
 
                 game.move_robot(robot_to_move, dir);
                 game.draw();
             }
         }
+    }
+}
+
+struct solutions
+{
+    void add(moves_vec solution)
+    {
+        if (solution.size() < move_count) {
+            move_count = solution.size();
+            options.clear();
+        }
+        options.push_back(solution);
+    }
+
+    size_t move_count = std::numeric_limits<size_t>::max();
+    std::vector<moves_vec> options;
+};
+
+static void do_solve(game_state const & game,
+                     std::unordered_map<robot_array, size_t> & states_achieved,
+                     moves_vec const & current_moves, solutions & sols)
+{
+    // can't improve down this route.
+    if (current_moves.size() == sols.move_count) {
+        return;
+    }
+
+    // probably too deep?
+    if (current_moves.size() > 15) {
+        return;
+    }
+
+    assert(current_moves.size() < sols.move_count);
+
+    moves_vec moves;
+    game.valid_moves(moves);
+
+    bool solution_found = false;
+    for (move mv : moves) {
+        game_state copy{game};
+        copy.play(mv);
+        if (copy.turn_over()) {
+            moves_vec solution = current_moves;
+            solution.emplace_back(mv);
+
+            sols.add(solution);
+            solution_found = true;
+
+            //printf("solution of size %zu found\n", solution.size());
+        }
+    }
+
+    if (solution_found) {
+        return;
+    }
+
+    for (move mv : moves) {
+        game_state copy{game};
+        copy.play(mv);
+        size_t moves_used = current_moves.size() + 1;
+        auto [it, did_insert] = states_achieved.emplace(copy.robots, moves_used);
+        if (did_insert || it->second > moves_used) {
+            it->second = moves_used;
+
+            moves_vec next_moves = current_moves;
+            next_moves.emplace_back(mv);
+            do_solve(copy, states_achieved, next_moves, sols);
+        }
+    }
+}
+
+static void solve()
+{
+    game_state game;
+
+    std::unordered_set<target> targets_used;
+    targets_used.insert(game.target_square);
+
+    while (true) {
+        game.draw();
+
+        std::unordered_map<robot_array, size_t> states_achieved;
+        states_achieved.emplace(game.robots, 0);
+
+        moves_vec current_moves;
+        solutions sols;
+        do_solve(game, states_achieved, current_moves, sols);
+
+        assert(sols.options.size() > 0);
+
+        printf("found %zu solution%s in %zu moves\n",
+               sols.options.size(), sols.options.size() > 1 ? "s" : "", sols.move_count);
+
+        int i_sol = 0;
+        for (moves_vec const & moves : sols.options) {
+            printf("solution %d\n", ++i_sol);
+            for (move const & mv : moves) {
+                printf("%s moves %s\n", to_str(game.robots[mv.robot_idx].color), to_str(mv.dir));
+            }
+            printf("\n");
+        }
+
+        int input = 0;
+        while (true) {
+            printf("select solution: ");
+            input = getchar();
+            if (input == EOF) {
+                exit(0);
+            }
+            input = (input - '0') - 1;
+            if (input < 0 || input >= (int)std::size(sols.options)) {
+                printf("\ninvalid selection\n");
+            } else {
+                break;
+            }
+        }
+
+        for (move const & mv : sols.options[input]) {
+            game.play(mv);
+        }
+
+        game.select_target(&targets_used);
+        printf("%zu targets used, selected target %c%c\n", targets_used.size(), to_char(game.target_square.color), to_char(game.target_square.shape));
+    }
+}
+
+static void usage(char ** argv)
+{
+    fprintf(stderr, "usage: %s [play|solve]\n", argv[0]);
+    exit(1);
+}
+
+int main(int argc, char ** argv)
+{
+    // seed 3945310130, eventually gets to 6 solutions in 7 moves
+    //
+    // fails to find green up, left, blue up, left, down, right, up
+
+    unsigned seed = 3945310130;//std::random_device{}();
+    printf("seed is %u\n", seed);
+    rng.seed(seed);
+
+    if (argc != 2) {
+        usage(argv);
+    } else if (strcmp(argv[1], "play") == 0) {
+        play_game();
+    } else if (strcmp(argv[1], "solve") == 0) {
+        solve();
+    } else {
+        fprintf(stderr, "unknown arg %s\n", argv[1]);
+        usage(argv);
     }
 }
