@@ -9,6 +9,11 @@
 #include <unistd.h>
 #include <termios.h>
 
+static std::mt19937 rng;
+
+static constexpr size_t k_board_width = 16;
+static constexpr size_t k_board_height = 16;
+
 enum class color_t : uint8_t
 {
     BLUE,
@@ -108,13 +113,41 @@ namespace std
     };
 }
 
-struct robot
+struct position
+{
+    position() = default;
+    position(uint8_t r, uint8_t c) : row{r}, col{c} {}
+
+    bool operator==(position const &) const = default;
+
+    uint8_t row;
+    uint8_t col;
+};
+
+namespace std
+{
+    template <> struct hash<position>
+    {
+        size_t operator()(position const & p) const
+        {
+            return static_cast<size_t>(p.row) | (static_cast<size_t>(p.col) << 8);
+        }
+    };
+}
+
+static position random_pos()
+{
+    std::uniform_int_distribution<uint8_t> row_dis(0, k_board_width - 1);
+    std::uniform_int_distribution<uint8_t> col_dis(0, k_board_height - 1);
+
+    return {row_dis(rng), col_dis(rng)};
+}
+
+struct robot : position
 {
     bool operator==(robot const &) const = default;
 
     color_t color;
-    uint8_t row;
-    uint8_t col;
 };
 
 static constexpr size_t k_num_robots = 4;
@@ -154,19 +187,14 @@ struct square
     bool allowable_starting_square = true;
 
     std::optional<target> target;
-
-    int8_t robot_idx = -1;
 };
-
-static constexpr size_t k_board_width = 16;
-static constexpr size_t k_board_height = 16;
 
 struct move
 {
     move() = default;
-    move(uint8_t i, direction_t d) : robot_idx{i}, dir{d} {}
+    move(color_t c, direction_t d) : robot_color{c}, dir{d} {}
 
-    uint8_t robot_idx;
+    color_t robot_color;
     direction_t dir;
 };
 
@@ -209,8 +237,8 @@ struct game_state
     game_state();
     game_state(game_state const &) = default;
 
-    void draw();
-    void move_robot(robot * r, direction_t dir);
+    void draw() const;
+    void move_robot(robot & r, direction_t dir);
 
     void valid_moves(moves_vec & vec) const;
 
@@ -218,28 +246,41 @@ struct game_state
 
     void play(move mv)
     {
-        move_robot(&robots[mv.robot_idx], mv.dir);
+        move_robot(get_robot(mv.robot_color), mv.dir);
+    }
+
+    void select_target(std::unordered_set<target> * targets_used = nullptr);
+
+    robot & get_robot(color_t c)
+    {
+        uint8_t raw = static_cast<uint8_t>(c);
+        assert(raw < std::size(robots));
+        return robots[raw];
+    }
+
+    square & get_square(position pos)
+    {
+        assert(pos.row < k_board_height && pos.col < k_board_width);
+        return board[pos.row][pos.col];
     }
 
     void select_target(std::unordered_set<target> * targets_used = nullptr);
 
 private:
     void init_board();
-    void select_starting_squares();
+    void init_robots();
 
-    bool can_move(robot const * r, direction_t dir) const;
-    void move_single(robot * r, direction_t dir);
+    std::optional<position> can_move(robot const & r, direction_t dir) const;
 
     // upper left is 0, 0. First coordinate is row, second is column
     square board[k_board_height][k_board_width];
 
 public:
+    target target_square;
     robot_array robots;
 
     target target_square;
 };
-
-static std::mt19937 rng{std::random_device{}()};
 
 void game_state::init_board()
 {
@@ -331,26 +372,17 @@ void game_state::init_board()
     board[15][13].block_east = true;
 }
 
-void game_state::select_starting_squares()
+void game_state::init_robots()
 {
-    robots[0].color = BLUE;
-    robots[1].color = RED;
-    robots[2].color = GREEN;
-    robots[3].color = YELLOW;
-
-    std::uniform_int_distribution<unsigned> row_dis(0, k_board_width - 1);
-    std::uniform_int_distribution<unsigned> col_dis(0, k_board_height - 1);
-
-    for (size_t i = 0; i < k_num_robots; ++i) {
+    std::unordered_set<position> used_positions;
+    for (color_t color : {BLUE, RED, GREEN, YELLOW}) {
+        robot & r = get_robot(color);
+        r.color = color;
         while (true) {
-            uint8_t row = row_dis(rng);
-            uint8_t col = col_dis(rng);
-
-            square & sq = board[row][col];
-            if (!sq.target && sq.robot_idx == -1 && sq.allowable_starting_square) {
-                robots[i].row = row;
-                robots[i].col = col;
-                sq.robot_idx = i;
+            position pos = random_pos();
+            square const & sq = get_square(pos);
+            if (!sq.target && !used_positions.insert(pos).second) {
+                static_cast<position &>(r) = pos;
                 break;
             }
         }
@@ -359,13 +391,9 @@ void game_state::select_starting_squares()
 
 void game_state::select_target(std::unordered_set<target> * targets_used)
 {
-    std::uniform_int_distribution<unsigned> row_dis(0, k_board_width - 1);
-    std::uniform_int_distribution<unsigned> col_dis(0, k_board_height - 1);
     while (true) {
-        uint8_t row = row_dis(rng);
-        uint8_t col = col_dis(rng);
-
-        square & sq = board[row][col];
+        position pos = random_pos();
+        square const & sq = get_square(pos);
         if (sq.target) {
             target tg = *sq.target;
             if (!targets_used || !targets_used->contains(tg)) {
@@ -382,11 +410,11 @@ void game_state::select_target(std::unordered_set<target> * targets_used)
 game_state::game_state()
 {
     init_board();
-    select_starting_squares();
+    init_robots();
     select_target();
 }
 
-void game_state::draw()
+void game_state::draw() const
 {
     std::string rows[k_board_height * 2];
     for (auto & row : rows) {
@@ -406,12 +434,7 @@ void game_state::draw()
                 rows[row * 2 + 1][col * 3 + 2] = '|';
             }
 
-            if (sq.robot_idx != -1) {
-                robot * r = &robots[sq.robot_idx];
-                char c = std::toupper(to_char(r->color));
-                rows[row * 2 + 1][col * 3] = c;
-                rows[row * 2 + 1][col * 3 + 1] = c;
-            } else if (sq.target && *sq.target == target_square) {
+            if (sq.target && *sq.target == target_square) {
                 rows[row * 2 + 1][col * 3] = to_char(sq.target->color);
                 rows[row * 2 + 1][col * 3 + 1] = to_char(sq.target->shape);
             } else if (sq.allowable_starting_square) {
@@ -420,65 +443,56 @@ void game_state::draw()
         }
     }
 
+    for (robot const & r : robots) {
+        char c = std::toupper(to_char(r.color));
+        rows[r.row * 2 + 1][r.col * 3] = c;
+        rows[r.row * 2 + 1][r.col * 3 + 1] = c;
+    }
+
     for (auto & row : rows) {
         printf("%s", row.c_str());
     }
 }
 
-bool game_state::can_move(robot const * r, direction_t dir) const
+std::optional<position> game_state::can_move(robot const & r, direction_t dir) const
 {
+    bool ok;
+    position target;
+
     switch (dir) {
     case UP:
-        return r->row > 0
-            && !board[r->row][r->col].block_north
-            && board[r->row - 1][r->col].robot_idx == -1;
+        ok = r.row > 0 && !board[r.row][r.col].block_north;
+        target = position(r.row - 1, r.col);
+        break;
     case DOWN:
-        return r->row < k_board_height - 1
-            && !board[r->row + 1][r->col].block_north
-            && board[r->row + 1][r->col].robot_idx == -1;
+        ok = r.row < k_board_height - 1 && !board[r.row + 1][r.col].block_north;
+        target = position(r.row + 1, r.col);
+        break;
     case LEFT:
-        return r->col > 0
-            && !board[r->row][r->col - 1].block_east
-            && board[r->row][r->col - 1].robot_idx == -1;
+        ok = r.col > 0 && !board[r.row][r.col - 1].block_east;
+        target = position(r.row, r.col - 1);
+        break;
     case RIGHT:
-        return r->col < k_board_width - 1
-            && !board[r->row][r->col].block_east
-            && board[r->row][r->col + 1].robot_idx == -1;
+        ok = r.col < k_board_width - 1 && !board[r.row][r.col].block_east;
+        target = position(r.row, r.col + 1);
+    }
+
+    ok = ok && std::none_of(std::begin(robots), std::end(robots), [&](robot const & r) {
+        return r == target;
+    });
+
+    if (ok) {
+        return target;
+    } else {
+        return std::nullopt;
     }
 }
 
-void game_state::move_single(robot * r, direction_t dir)
+void game_state::move_robot(robot & r, direction_t dir)
 {
-    int8_t r_idx = r - robots.data();
-
-    int delta_row = 0;
-    int delta_col = 0;
-    switch (dir) {
-    case UP:
-        delta_row = -1;
-        break;
-    case DOWN:
-        delta_row = 1;
-        break;
-    case LEFT:
-        delta_col = -1;
-        break;
-    case RIGHT:
-        delta_col = 1;
-        break;
-    }
-
-    assert(board[r->row][r->col].robot_idx == r_idx);
-    board[r->row][r->col].robot_idx = -1;
-    r->row += delta_row;
-    r->col += delta_col;
-    board[r->row][r->col].robot_idx = r_idx;
-}
-
-void game_state::move_robot(robot * r, direction_t dir)
-{
-    while (can_move(r, dir)) {
-        move_single(r, dir);
+    std::optional<position> pos;
+    while ((pos = can_move(r, dir))) {
+        static_cast<position &>(r) = *pos;
     }
 }
 
@@ -486,11 +500,10 @@ void game_state::valid_moves(moves_vec & vec) const
 {
     vec.clear();
 
-    for (uint8_t i = 0; i < k_num_robots; ++i) {
-        robot const * r = &robots[i];
+    for (robot const & r : robots) {
         for (direction_t d : {UP, DOWN, LEFT, RIGHT}) {
             if (can_move(r, d)) {
-                vec.emplace_back(i, d);
+                vec.emplace_back(r.color, d);
             }
         }
     }
@@ -537,7 +550,7 @@ static void play_game()
 
     game_state game;
     game.draw();
-    robot * robot_to_move = &game.robots[0];
+    robot & robot_to_move = game.robots[0];
 
     int ch;
     while ((ch = getchar()) != EOF) {
@@ -618,7 +631,7 @@ static void do_solve(game_state const & game,
             sols.add(solution);
             solution_found = true;
 
-            //printf("solution of size %zu found\n", solution.size());
+            printf("solution of size %zu found\n", solution.size());
         }
     }
 
@@ -631,7 +644,7 @@ static void do_solve(game_state const & game,
         copy.play(mv);
         size_t moves_used = current_moves.size() + 1;
         auto [it, did_insert] = states_achieved.emplace(copy.robots, moves_used);
-        if (did_insert || it->second > moves_used) {
+        if (did_insert || it->second >= moves_used) {
             it->second = moves_used;
 
             moves_vec next_moves = current_moves;
@@ -667,7 +680,7 @@ static void solve()
         for (moves_vec const & moves : sols.options) {
             printf("solution %d\n", ++i_sol);
             for (move const & mv : moves) {
-                printf("%s moves %s\n", to_str(game.robots[mv.robot_idx].color), to_str(mv.dir));
+                printf("%s moves %s\n", to_str(mv.robot_color), to_str(mv.dir));
             }
             printf("\n");
         }
