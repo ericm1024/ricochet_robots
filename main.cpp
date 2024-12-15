@@ -98,13 +98,30 @@ struct square
 static constexpr size_t k_board_width = 16;
 static constexpr size_t k_board_height = 16;
 
-// upper left is 0, 0. First coordinate is row, second is column
-static square board[k_board_height][k_board_width];
-static robot robots[4];
+struct game_state
+{
+    game_state();
+
+    void draw();
+
+    void move_robot(robot * r, direction_t dir);
+
+private:
+    void init_board();
+    void select_starting_squares();
+    bool can_move(robot * r, direction_t dir);
+    void move_single(robot * r, direction_t dir);
+
+    // upper left is 0, 0. First coordinate is row, second is column
+    square board[k_board_height][k_board_width];
+
+public:
+    robot robots[4];
+};
 
 static std::mt19937 rng{std::random_device{}()};
 
-static void init_board()
+void game_state::init_board()
 {
     board[0][2].block_east = true;
     board[0][11].block_east = true;
@@ -194,7 +211,7 @@ static void init_board()
     board[15][13].block_east = true;
 }
 
-static void select_starting_squares()
+void game_state::select_starting_squares()
 {
     robots[0].color = BLUE;
     robots[1].color = RED;
@@ -220,13 +237,13 @@ static void select_starting_squares()
     }
 }
 
-static void init()
+game_state::game_state()
 {
     init_board();
     select_starting_squares();
 }
 
-static void draw()
+void game_state::draw()
 {
     std::string rows[k_board_height * 2];
     for (auto & row : rows) {
@@ -264,7 +281,7 @@ static void draw()
     }
 }
 
-static bool can_move(robot * r, direction_t dir)
+bool game_state::can_move(robot * r, direction_t dir)
 {
     switch (dir) {
     case UP:
@@ -286,7 +303,7 @@ static bool can_move(robot * r, direction_t dir)
     }
 }
 
-static void move_single(robot * r, direction_t dir)
+void game_state::move_single(robot * r, direction_t dir)
 {
     int delta_row = 0;
     int delta_col = 0;
@@ -312,7 +329,7 @@ static void move_single(robot * r, direction_t dir)
     board[r->row][r->col].robot = r;
 }
 
-static void move_robot(robot * r, direction_t dir)
+void game_state::move_robot(robot * r, direction_t dir)
 {
     while (can_move(r, dir)) {
         move_single(r, dir);
@@ -341,13 +358,13 @@ void reset_mode()
 
 int main()
 {
-    init();
-    draw();
-
     set_raw_mode(STDOUT_FILENO);
     atexit(reset_mode);
 
-    robot * robot_to_move = &robots[0];
+    game_state game;
+    game.draw();
+
+    robot * robot_to_move = &game.robots[0];
 
     int ch;
     while ((ch = getchar()) != EOF) {
@@ -376,8 +393,8 @@ int main()
 
                 printf("\n\nmove %s\n\n", dir_to_str(dir));
 
-                move_robot(robot_to_move, dir);
-                draw();
+                game.move_robot(robot_to_move, dir);
+                game.draw();
             }
         }
     }
