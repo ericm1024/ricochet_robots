@@ -1,6 +1,12 @@
+#include <cassert>
 #include <cstdio>
-#include <string>
+#include <cstdlib>
 #include <optional>
+#include <random>
+#include <string>
+
+#include <unistd.h>
+#include <termios.h>
 
 enum class color_t
 {
@@ -23,7 +29,7 @@ static char color_to_char(color_t c)
     }
 }
 
-enum shape_t
+enum class shape_t
 {
     CRESCENT,
     GEAR,
@@ -44,6 +50,25 @@ static char shape_to_char(shape_t s)
     }
 }
 
+enum class direction_t
+{
+    UP,
+    DOWN,
+    LEFT,
+    RIGHT,
+};
+using enum direction_t;
+
+static char const * dir_to_str(direction_t dir)
+{
+    switch (dir) {
+    case UP: return "UP";
+    case DOWN: return "DOWN";
+    case LEFT: return "LEFT";
+    case RIGHT: return "RIGHT";
+    }
+}
+
 struct target
 {
     target(color_t c, shape_t s) : color{c}, shape{s} {}
@@ -52,22 +77,34 @@ struct target
     shape_t shape;
 };
 
+struct robot
+{
+    color_t color;
+    uint8_t row;
+    uint8_t col;
+};
+
 struct square
 {
     bool block_north = false;
     bool block_east = false;
+    bool allowable_starting_square = true;
 
     std::optional<target> target;
-};
 
+    robot * robot = nullptr;
+};
 
 static constexpr size_t k_board_width = 16;
 static constexpr size_t k_board_height = 16;
 
 // upper left is 0, 0. First coordinate is row, second is column
 static square board[k_board_height][k_board_width];
+static robot robots[4];
 
-void init_board()
+static std::mt19937 rng{std::random_device{}()};
+
+static void init_board()
 {
     board[0][2].block_east = true;
     board[0][11].block_east = true;
@@ -109,11 +146,15 @@ void init_board()
 
     board[7][6].block_east = true;
     board[7][7].block_north = true;
+    board[7][7].allowable_starting_square = false;
     board[7][8].block_north = true;
     board[7][8].block_east = true;
+    board[7][8].allowable_starting_square = false;
 
     board[8][6].block_east = true;
     board[8][8].block_east = true;
+    board[8][7].allowable_starting_square = false;
+    board[8][8].allowable_starting_square = false;
 
     board[9][3].block_north = true;
     board[9][3].block_east = true;
@@ -153,8 +194,39 @@ void init_board()
     board[15][13].block_east = true;
 }
 
+static void select_starting_squares()
+{
+    robots[0].color = BLUE;
+    robots[1].color = RED;
+    robots[2].color = GREEN;
+    robots[3].color = YELLOW;
 
-void draw()
+    std::uniform_int_distribution<unsigned> row_dis(0, k_board_width - 1);
+    std::uniform_int_distribution<unsigned> col_dis(0, k_board_height - 1);
+
+    for (size_t i = 0; i < 4; ++i) {
+        while (true) {
+            uint8_t row = row_dis(rng);
+            uint8_t col = col_dis(rng);
+
+            square & sq = board[row][col];
+            if (!sq.target && !sq.robot && sq.allowable_starting_square) {
+                robots[i].row = row;
+                robots[i].col = col;
+                sq.robot = &robots[i];
+                break;
+            }
+        }
+    }
+}
+
+static void init()
+{
+    init_board();
+    select_starting_squares();
+}
+
+static void draw()
 {
     std::string rows[k_board_height * 2];
     for (auto & row : rows) {
@@ -174,10 +246,14 @@ void draw()
                 rows[row * 2 + 1][col * 3 + 2] = '|';
             }
 
-            if (sq.target) {
+            if (sq.robot) {
+                char c = std::toupper(color_to_char(sq.robot->color));
+                rows[row * 2 + 1][col * 3] = c;
+                rows[row * 2 + 1][col * 3 + 1] = c;
+            } else if (sq.target) {
                 rows[row * 2 + 1][col * 3] = color_to_char(sq.target->color);
                 rows[row * 2 + 1][col * 3 + 1] = shape_to_char(sq.target->shape);
-            } else {
+            } else if (sq.allowable_starting_square) {
                 rows[row * 2 + 1][col * 3] = '.';
             }
         }
@@ -188,8 +264,121 @@ void draw()
     }
 }
 
+static bool can_move(robot * r, direction_t dir)
+{
+    switch (dir) {
+    case UP:
+        return r->row > 0
+            && !board[r->row][r->col].block_north
+            && !board[r->row - 1][r->col].robot;
+    case DOWN:
+        return r->row < k_board_height - 1
+            && !board[r->row + 1][r->col].block_north
+            && !board[r->row + 1][r->col].robot;
+    case LEFT:
+        return r->col > 0
+            && !board[r->row][r->col - 1].block_east
+            && !board[r->row][r->col - 1].robot;
+    case RIGHT:
+        return r->col < k_board_width - 1
+            && !board[r->row][r->col].block_east
+            && !board[r->row][r->col + 1].robot;
+    }
+}
+
+static void move_single(robot * r, direction_t dir)
+{
+    int delta_row = 0;
+    int delta_col = 0;
+    switch (dir) {
+    case UP:
+        delta_row = -1;
+        break;
+    case DOWN:
+        delta_row = 1;
+        break;
+    case LEFT:
+        delta_col = -1;
+        break;
+    case RIGHT:
+        delta_col = 1;
+        break;
+    }
+
+    assert(board[r->row][r->col].robot == r);
+    board[r->row][r->col].robot = nullptr;
+    r->row += delta_row;
+    r->col += delta_col;
+    board[r->row][r->col].robot = r;
+}
+
+static void move_robot(robot * r, direction_t dir)
+{
+    while (can_move(r, dir)) {
+        move_single(r, dir);
+    }
+}
+
+// from chatgpt
+void set_raw_mode(int fd)
+{
+    struct termios term;
+    tcgetattr(fd, &term); // Get current terminal settings
+    term.c_lflag &= ~(ICANON | ECHO); // Disable canonical mode and echoing
+    term.c_cc[VMIN] = 1; // Minimum characters to read
+    term.c_cc[VTIME] = 0; // Timeout
+    tcsetattr(fd, TCSAFLUSH, &term); // Set terminal settings
+}
+
+// from chatgpt
+void reset_mode()
+{
+    struct termios term;
+    tcgetattr(STDOUT_FILENO, &term);
+    term.c_lflag |= (ICANON | ECHO); // Restore canonical mode and echoing
+    tcsetattr(STDOUT_FILENO, TCSAFLUSH, &term);
+}
+
 int main()
 {
-    init_board();
+    init();
     draw();
+
+    set_raw_mode(STDOUT_FILENO);
+    atexit(reset_mode);
+
+    robot * robot_to_move = &robots[0];
+
+    int ch;
+    while ((ch = getchar()) != EOF) {
+        if (ch == 27) { // Escape character (for arrow keys)
+            ch = getchar(); // Should be '['
+            if (ch == '[') {
+                ch = getchar();
+                direction_t dir;
+                switch (ch) {
+                case 'A':
+                    dir = UP;
+                    break;
+                case 'B':
+                    dir = DOWN;
+                    break;
+                case 'C':
+                    dir = RIGHT;
+                    break;
+                case 'D':
+                    dir = LEFT;
+                    break;
+                default:
+                    printf("Unknown arrow key\n");
+                    exit(1);
+                }
+
+                printf("\n\nmove %s\n\n", dir_to_str(dir));
+
+                move_robot(robot_to_move, dir);
+                draw();
+            }
+        }
+    }
 }
