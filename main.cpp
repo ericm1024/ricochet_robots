@@ -92,7 +92,7 @@ struct square
 
     std::optional<target> target;
 
-    robot * robot = nullptr;
+    int8_t robot_idx = -1;
 };
 
 static constexpr size_t k_board_width = 16;
@@ -101,6 +101,7 @@ static constexpr size_t k_board_height = 16;
 struct game_state
 {
     game_state();
+    game_state(game_state const &) = default;
 
     void draw();
 
@@ -227,10 +228,10 @@ void game_state::select_starting_squares()
             uint8_t col = col_dis(rng);
 
             square & sq = board[row][col];
-            if (!sq.target && !sq.robot && sq.allowable_starting_square) {
+            if (!sq.target && sq.robot_idx == -1 && sq.allowable_starting_square) {
                 robots[i].row = row;
                 robots[i].col = col;
-                sq.robot = &robots[i];
+                sq.robot_idx = i;
                 break;
             }
         }
@@ -263,8 +264,9 @@ void game_state::draw()
                 rows[row * 2 + 1][col * 3 + 2] = '|';
             }
 
-            if (sq.robot) {
-                char c = std::toupper(color_to_char(sq.robot->color));
+            if (sq.robot_idx != -1) {
+                robot * r = &robots[sq.robot_idx];
+                char c = std::toupper(color_to_char(r->color));
                 rows[row * 2 + 1][col * 3] = c;
                 rows[row * 2 + 1][col * 3 + 1] = c;
             } else if (sq.target) {
@@ -287,24 +289,26 @@ bool game_state::can_move(robot * r, direction_t dir)
     case UP:
         return r->row > 0
             && !board[r->row][r->col].block_north
-            && !board[r->row - 1][r->col].robot;
+            && board[r->row - 1][r->col].robot_idx == -1;
     case DOWN:
         return r->row < k_board_height - 1
             && !board[r->row + 1][r->col].block_north
-            && !board[r->row + 1][r->col].robot;
+            && board[r->row + 1][r->col].robot_idx == -1;
     case LEFT:
         return r->col > 0
             && !board[r->row][r->col - 1].block_east
-            && !board[r->row][r->col - 1].robot;
+            && board[r->row][r->col - 1].robot_idx == -1;
     case RIGHT:
         return r->col < k_board_width - 1
             && !board[r->row][r->col].block_east
-            && !board[r->row][r->col + 1].robot;
+            && board[r->row][r->col + 1].robot_idx == -1;
     }
 }
 
 void game_state::move_single(robot * r, direction_t dir)
 {
+    int8_t r_idx = r - robots;
+
     int delta_row = 0;
     int delta_col = 0;
     switch (dir) {
@@ -322,11 +326,11 @@ void game_state::move_single(robot * r, direction_t dir)
         break;
     }
 
-    assert(board[r->row][r->col].robot == r);
-    board[r->row][r->col].robot = nullptr;
+    assert(board[r->row][r->col].robot_idx == r_idx);
+    board[r->row][r->col].robot_idx = -1;
     r->row += delta_row;
     r->col += delta_col;
-    board[r->row][r->col].robot = r;
+    board[r->row][r->col].robot_idx = r_idx;
 }
 
 void game_state::move_robot(robot * r, direction_t dir)
