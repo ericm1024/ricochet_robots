@@ -619,6 +619,61 @@ struct solutions
     std::vector<moves_vec> options;
 };
 
+static solutions solve_bfs(game_state const & game)
+{
+    solutions sols;
+    if (game.target_achieved()) {
+        // degenerate solution
+        sols.move_count = 0;
+        sols.options.emplace_back();
+
+        return sols;
+    }
+
+    std::unordered_map<robot_array, size_t> states_achieved{{game.robots, 0}};
+    std::vector<std::pair<game_state, moves_vec>> states_to_explore{{game, {}}};
+    std::vector<std::pair<game_state, moves_vec>> next_states;
+
+    size_t moves_used = 0;
+    while (sols.options.empty()) {
+        ++moves_used;
+
+        //printf("trying with %zu moves\n", moves_used);
+
+        for (auto const & [state, moves] : states_to_explore) {
+            moves_vec valid_moves;
+            state.valid_moves(valid_moves);
+
+            for (move mv : valid_moves) {
+                game_state copy{state};
+                copy.play(mv);
+
+                if (copy.target_achieved()) {
+                    moves_vec solution = moves;
+                    solution.emplace_back(mv);
+                    sols.add(solution);
+
+                    //printf("solution of size %zu found\n", solution.size());
+                } else {
+                    auto [it, did_insert] = states_achieved.emplace(copy.robots, moves_used);
+                    if (did_insert || it->second > moves_used) {
+                        moves_vec next_moves = moves;
+                        next_moves.emplace_back(mv);
+
+                        it->second = moves_used;
+                        next_states.emplace_back(copy, next_moves);
+                    }
+                }
+            }
+        }
+
+        std::swap(states_to_explore, next_states);
+        next_states.clear();
+    }
+
+    return sols;
+}
+
 static void do_solve(game_state const & game,
                      std::unordered_map<robot_array, size_t> & states_achieved,
                      moves_vec const & current_moves, solutions & sols)
@@ -706,7 +761,20 @@ static void play()
                to_char(game.target_square.color),
                to_char(game.target_square.shape));
 
-        solutions sols = solve(game);
+        {
+            auto start = std::chrono::high_resolution_clock::now();
+            solutions sols = solve(game);
+            auto end = std::chrono::high_resolution_clock::now();
+            auto dur = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+            printf("solve with DFS in %lld us\n", dur);
+            sols.print();
+        }
+
+        auto start = std::chrono::high_resolution_clock::now();
+        solutions sols = solve_bfs(game);
+        auto end = std::chrono::high_resolution_clock::now();
+        auto dur = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        printf("\nsolve with BFS in %lld us\n", dur);
         sols.print();
 
         int input = 0;
