@@ -72,6 +72,18 @@ static char to_char(shape_t s)
     }
 }
 
+static char const * to_str(shape_t s)
+{
+    switch (s) {
+    case CRESCENT: return "crescent";
+    case GEAR: return "gear";
+    case PLANET: return "planet";
+    case STAR: return "star";
+    case HOLE: return "hole";
+    case INVALID_SHAPE: assert(false); return "invalid_shape";
+    }
+}
+
 enum class direction_t : uint8_t
 {
     UP,
@@ -232,57 +244,10 @@ private:
     size_t count = 0;
 };
 
-struct game_state
-{
-    game_state();
-    game_state(game_state const &) = default;
+// upper left is 0, 0. First coordinate is row, second is column
+static square board[k_board_height][k_board_width];
 
-    void draw() const;
-    void move_robot(robot & r, direction_t dir);
-
-    void valid_moves(moves_vec & vec) const;
-
-    bool turn_over() const;
-
-    void play(move mv)
-    {
-        move_robot(get_robot(mv.robot_color), mv.dir);
-    }
-
-    void select_target(std::unordered_set<target> * targets_used = nullptr);
-
-    robot & get_robot(color_t c)
-    {
-        uint8_t raw = static_cast<uint8_t>(c);
-        assert(raw < std::size(robots));
-        return robots[raw];
-    }
-
-    square & get_square(position pos)
-    {
-        assert(pos.row < k_board_height && pos.col < k_board_width);
-        return board[pos.row][pos.col];
-    }
-
-    void select_target(std::unordered_set<target> * targets_used = nullptr);
-
-private:
-    void init_board();
-    void init_robots();
-
-    std::optional<position> can_move(robot const & r, direction_t dir) const;
-
-    // upper left is 0, 0. First coordinate is row, second is column
-    square board[k_board_height][k_board_width];
-
-public:
-    target target_square;
-    robot_array robots;
-
-    target target_square;
-};
-
-void game_state::init_board()
+void init_board()
 {
     board[0][2].block_east = true;
     board[0][11].block_east = true;
@@ -372,6 +337,48 @@ void game_state::init_board()
     board[15][13].block_east = true;
 }
 
+struct game_state
+{
+    game_state();
+    game_state(game_state const &) = default;
+
+    void draw() const;
+    void move_robot(robot & r, direction_t dir);
+
+    void valid_moves(moves_vec & vec) const;
+
+    bool target_achieved() const;
+
+    void play(move mv)
+    {
+        move_robot(get_robot(mv.robot_color), mv.dir);
+    }
+
+    void select_target(std::unordered_set<target> & targets_used);
+
+    robot & get_robot(color_t c)
+    {
+        uint8_t raw = static_cast<uint8_t>(c);
+        assert(raw < std::size(robots));
+        return robots[raw];
+    }
+
+    square & get_square(position pos)
+    {
+        assert(pos.row < k_board_height && pos.col < k_board_width);
+        return board[pos.row][pos.col];
+    }
+
+private:
+    void init_robots();
+
+    std::optional<position> can_move(robot const & r, direction_t dir) const;
+
+public:
+    target target_square;
+    robot_array robots;
+};
+
 void game_state::init_robots()
 {
     std::unordered_set<position> used_positions;
@@ -389,19 +396,15 @@ void game_state::init_robots()
     }
 }
 
-void game_state::select_target(std::unordered_set<target> * targets_used)
+void game_state::select_target(std::unordered_set<target> & targets_used)
 {
     while (true) {
-        position pos = random_pos();
-        square const & sq = get_square(pos);
+        square const & sq = get_square(random_pos());
         if (sq.target) {
             target tg = *sq.target;
-            if (!targets_used || !targets_used->contains(tg)) {
+            if (targets_used.insert(tg).second) {
                 target_square = tg;
-                if (targets_used) {
-                    targets_used->insert(tg);
-                }
-                break;
+                return;
             }
         }
     }
@@ -409,9 +412,7 @@ void game_state::select_target(std::unordered_set<target> * targets_used)
 
 game_state::game_state()
 {
-    init_board();
     init_robots();
-    select_target();
 }
 
 void game_state::draw() const
@@ -421,6 +422,8 @@ void game_state::draw() const
         row.resize(k_board_width * 3 + 1, ' ');
         row.back() = '\n';
     }
+
+    bool show_all_targets = getenv("SHOW_ALL_TARGETS");
 
     for (unsigned row = 0; row < k_board_height; ++row) {
         for (unsigned col = 0; col < k_board_width; ++col) {
@@ -434,7 +437,7 @@ void game_state::draw() const
                 rows[row * 2 + 1][col * 3 + 2] = '|';
             }
 
-            if (sq.target && *sq.target == target_square) {
+            if (sq.target && (*sq.target == target_square || show_all_targets)) {
                 rows[row * 2 + 1][col * 3] = to_char(sq.target->color);
                 rows[row * 2 + 1][col * 3 + 1] = to_char(sq.target->shape);
             } else if (sq.allowable_starting_square) {
@@ -511,7 +514,7 @@ void game_state::valid_moves(moves_vec & vec) const
     assert(!vec.empty());
 }
 
-bool game_state::turn_over() const
+bool game_state::target_achieved() const
 {
     for (robot const & r : robots) {
         square const & sq = board[r.row][r.col];
@@ -624,14 +627,14 @@ static void do_solve(game_state const & game,
     for (move mv : moves) {
         game_state copy{game};
         copy.play(mv);
-        if (copy.turn_over()) {
+        if (copy.target_achieved()) {
             moves_vec solution = current_moves;
             solution.emplace_back(mv);
 
             sols.add(solution);
             solution_found = true;
 
-            printf("solution of size %zu found\n", solution.size());
+            //printf("solution of size %zu found\n", solution.size());
         }
     }
 
@@ -644,7 +647,7 @@ static void do_solve(game_state const & game,
         copy.play(mv);
         size_t moves_used = current_moves.size() + 1;
         auto [it, did_insert] = states_achieved.emplace(copy.robots, moves_used);
-        if (did_insert || it->second >= moves_used) {
+        if (did_insert || it->second > moves_used) {
             it->second = moves_used;
 
             moves_vec next_moves = current_moves;
@@ -659,7 +662,7 @@ static void solve()
     game_state game;
 
     std::unordered_set<target> targets_used;
-    targets_used.insert(game.target_square);
+    game.select_target(targets_used);
 
     while (true) {
         game.draw();
@@ -667,9 +670,21 @@ static void solve()
         std::unordered_map<robot_array, size_t> states_achieved;
         states_achieved.emplace(game.robots, 0);
 
+        printf("target is %s %s (%c%c)\n", to_str(game.target_square.color),
+               to_str(game.target_square.shape),
+               to_char(game.target_square.color),
+               to_char(game.target_square.shape));
+
         moves_vec current_moves;
         solutions sols;
-        do_solve(game, states_achieved, current_moves, sols);
+
+        if (game.target_achieved()) {
+            // degenerate solution
+            sols.move_count = 0;
+            sols.options.push_back(current_moves);
+        } else {
+            do_solve(game, states_achieved, current_moves, sols);
+        }
 
         assert(sols.options.size() > 0);
 
@@ -688,13 +703,16 @@ static void solve()
         int input = 0;
         while (true) {
             printf("select solution: ");
-            input = getchar();
-            if (input == EOF) {
+            int raw_input = getchar();
+            if (raw_input == EOF) {
                 exit(0);
             }
-            input = (input - '0') - 1;
+            if (raw_input == '\n') {
+                continue;
+            }
+            input = (raw_input - '0') - 1;
             if (input < 0 || input >= (int)std::size(sols.options)) {
-                printf("\ninvalid selection\n");
+                printf("\ninvalid selection 0x%x\n", raw_input);
             } else {
                 break;
             }
@@ -704,8 +722,7 @@ static void solve()
             game.play(mv);
         }
 
-        game.select_target(&targets_used);
-        printf("%zu targets used, selected target %c%c\n", targets_used.size(), to_char(game.target_square.color), to_char(game.target_square.shape));
+        game.select_target(targets_used);
     }
 }
 
@@ -717,11 +734,15 @@ static void usage(char ** argv)
 
 int main(int argc, char ** argv)
 {
-    // seed 3945310130, eventually gets to 6 solutions in 7 moves
-    //
-    // fails to find green up, left, blue up, left, down, right, up
+    init_board();
 
-    unsigned seed = 3945310130;//std::random_device{}();
+    unsigned seed = 0;
+    if (char * seed_env = getenv("SEED")) {
+        seed = strtol(seed_env, NULL, 10);
+    } else {
+        seed = std::random_device{}();
+    }
+
     printf("seed is %u\n", seed);
     rng.seed(seed);
 
