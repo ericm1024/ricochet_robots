@@ -546,7 +546,7 @@ void reset_mode()
     tcsetattr(STDOUT_FILENO, TCSAFLUSH, &term);
 }
 
-static void play_game()
+static void test_movement()
 {
     set_raw_mode(STDOUT_FILENO);
     atexit(reset_mode);
@@ -598,6 +598,21 @@ struct solutions
             options.clear();
         }
         options.push_back(solution);
+    }
+
+    void print()
+    {
+        printf("found %zu solution%s in %zu moves\n",
+               options.size(), options.size() > 1 ? "s" : "", move_count);
+
+        int i_sol = 0;
+        for (moves_vec const & moves : options) {
+            printf("solution %d\n", ++i_sol);
+            for (move const & mv : moves) {
+                printf("%s moves %s\n", to_str(mv.robot_color), to_str(mv.dir));
+            }
+            printf("\n");
+        }
     }
 
     size_t move_count = std::numeric_limits<size_t>::max();
@@ -657,7 +672,26 @@ static void do_solve(game_state const & game,
     }
 }
 
-static void solve()
+static solutions solve(game_state const & game)
+{
+    std::unordered_map<robot_array, size_t> states_achieved;
+    states_achieved.emplace(game.robots, 0);
+
+    solutions sols;
+    moves_vec current_moves;
+    if (game.target_achieved()) {
+        // degenerate solution
+        sols.move_count = 0;
+        sols.options.push_back(current_moves);
+    } else {
+        do_solve(game, states_achieved, current_moves, sols);
+    }
+
+    assert(sols.options.size() > 0);
+    return sols;
+}
+
+static void play()
 {
     game_state game;
 
@@ -667,38 +701,13 @@ static void solve()
     while (true) {
         game.draw();
 
-        std::unordered_map<robot_array, size_t> states_achieved;
-        states_achieved.emplace(game.robots, 0);
-
         printf("target is %s %s (%c%c)\n", to_str(game.target_square.color),
                to_str(game.target_square.shape),
                to_char(game.target_square.color),
                to_char(game.target_square.shape));
 
-        moves_vec current_moves;
-        solutions sols;
-
-        if (game.target_achieved()) {
-            // degenerate solution
-            sols.move_count = 0;
-            sols.options.push_back(current_moves);
-        } else {
-            do_solve(game, states_achieved, current_moves, sols);
-        }
-
-        assert(sols.options.size() > 0);
-
-        printf("found %zu solution%s in %zu moves\n",
-               sols.options.size(), sols.options.size() > 1 ? "s" : "", sols.move_count);
-
-        int i_sol = 0;
-        for (moves_vec const & moves : sols.options) {
-            printf("solution %d\n", ++i_sol);
-            for (move const & mv : moves) {
-                printf("%s moves %s\n", to_str(mv.robot_color), to_str(mv.dir));
-            }
-            printf("\n");
-        }
+        solutions sols = solve(game);
+        sols.print();
 
         int input = 0;
         while (true) {
@@ -728,7 +737,7 @@ static void solve()
 
 static void usage(char ** argv)
 {
-    fprintf(stderr, "usage: %s [play|solve]\n", argv[0]);
+    fprintf(stderr, "usage: %s [play|test_movement]\n", argv[0]);
     exit(1);
 }
 
@@ -748,10 +757,10 @@ int main(int argc, char ** argv)
 
     if (argc != 2) {
         usage(argv);
+    } else if (strcmp(argv[1], "test_movement") == 0) {
+        test_movement();
     } else if (strcmp(argv[1], "play") == 0) {
-        play_game();
-    } else if (strcmp(argv[1], "solve") == 0) {
-        solve();
+        play();
     } else {
         fprintf(stderr, "unknown arg %s\n", argv[1]);
         usage(argv);
