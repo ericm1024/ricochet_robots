@@ -388,7 +388,7 @@ void game_state::init_robots()
         while (true) {
             position pos = random_pos();
             square const & sq = get_square(pos);
-            if (!sq.target && !used_positions.insert(pos).second) {
+            if (!sq.target && sq.allowable_starting_square && used_positions.insert(pos).second) {
                 static_cast<position &>(r) = pos;
                 break;
             }
