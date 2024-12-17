@@ -49,6 +49,18 @@ static char const * to_str(color_t c)
     }
 }
 
+static int termcolor(color_t c)
+{
+    switch (c) {
+    case BLUE: return 34;
+    case RED: return 31;
+    case GREEN: return 32;
+    case YELLOW: return 33; // try 93?
+    case RAINBOW: return 0;
+    case INVALID_COLOR: assert(false); return 0;
+    }
+}
+
 enum class shape_t : uint8_t
 {
     CRESCENT,
@@ -444,45 +456,58 @@ void game_state::init_targets()
     }
 }
 
-void game_state::draw(robot_array const & robots) const
+static void draw_square_upper(square const & sq)
 {
-    std::string rows[k_board_height * 2];
-    for (auto & row : rows) {
-        row.resize(k_board_width * 3 + 1, ' ');
-        row.back() = '\n';
+    if (sq.block_north) {
+        printf("__ ");
+    } else {
+        printf("   ");
+    }
+}
+
+static void draw_square_lower(unsigned row, unsigned col,
+                              square const & sq, robot_array const & robots,
+                              target const & target_square, bool show_all_targets)
+{
+    auto it = std::find_if(robots.begin(), robots.end(), [&](robot const & r) {
+        return r.row == row && r.col == col;
+    });
+
+    if (it != robots.end()) {
+        char c = std::toupper(to_char(it->color));
+        int color_code = termcolor(it->color);
+        printf("\033[%d;1m%c%c\033[0m", color_code, c, c);
+    } else if (sq.target && (*sq.target == target_square || show_all_targets)) {
+        int color_code = termcolor(sq.target->color);
+        printf("\033[%d;1m%c%c\033[0m", color_code, to_char(sq.target->color),
+               to_char(sq.target->shape));
+    } else if (sq.allowable_starting_square) {
+        printf(". ");
+    } else {
+        printf("  ");
     }
 
-    bool show_all_targets = getenv("SHOW_ALL_TARGETS");
+    if (sq.block_east) {
+        printf("|");
+    } else {
+        printf(" ");
+    }
+}
 
+void game_state::draw(robot_array const & robots) const
+{
+    bool show_all_targets = getenv("SHOW_ALL_TARGETS");
     for (unsigned row = 0; row < k_board_height; ++row) {
         for (unsigned col = 0; col < k_board_width; ++col) {
             square const & sq = board[row][col];
-
-            if (sq.block_north) {
-                rows[row * 2][col * 3] = '_';
-                rows[row * 2][col * 3 + 1] = '_';
-            }
-            if (sq.block_east) {
-                rows[row * 2 + 1][col * 3 + 2] = '|';
-            }
-
-            if (sq.target && (*sq.target == target_square || show_all_targets)) {
-                rows[row * 2 + 1][col * 3] = to_char(sq.target->color);
-                rows[row * 2 + 1][col * 3 + 1] = to_char(sq.target->shape);
-            } else if (sq.allowable_starting_square) {
-                rows[row * 2 + 1][col * 3] = '.';
-            }
+            draw_square_upper(sq);
         }
-    }
-
-    for (robot const & r : robots) {
-        char c = std::toupper(to_char(r.color));
-        rows[r.row * 2 + 1][r.col * 3] = c;
-        rows[r.row * 2 + 1][r.col * 3 + 1] = c;
-    }
-
-    for (auto & row : rows) {
-        printf("%s", row.c_str());
+        printf("\n");
+        for (unsigned col = 0; col < k_board_width; ++col) {
+            square const & sq = board[row][col];
+            draw_square_lower(row, col, sq, robots, target_square, show_all_targets);
+        }
+        printf("\n");
     }
 }
 
