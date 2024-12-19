@@ -1,6 +1,8 @@
+#include <bit>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
@@ -8,11 +10,16 @@
 
 #include <unistd.h>
 #include <termios.h>
+#include <fcntl.h>
+
+#include <arm_acle.h>
 
 static std::mt19937 rng;
 
 static constexpr size_t k_board_width = 16;
 static constexpr size_t k_board_height = 16;
+
+static char const game_filename[] = "robots_game.bak";
 
 enum class color_t : uint8_t
 {
@@ -144,8 +151,8 @@ struct position
 
     bool operator==(position const &) const = default;
 
-    uint8_t row;
-    uint8_t col;
+    uint8_t row : 4;
+    uint8_t col : 4;
 };
 
 namespace std
@@ -170,21 +177,39 @@ static position random_pos()
 struct robot : position
 {
     bool operator==(robot const &) const = default;
-
-    color_t color;
 };
 
 static constexpr size_t k_num_robots = 4;
 
-using robot_array = std::array<robot, k_num_robots>;
-static_assert(sizeof(robot_array) == 12);
-
-static robot & get_robot(robot_array & robots, color_t c)
+struct robot_array : std::array<robot, k_num_robots>
 {
-    uint8_t raw = static_cast<uint8_t>(c);
-    assert(raw < std::size(robots));
-    return robots[raw];
-}
+    color_t color_of(robot const & r) const
+    {
+        ptrdiff_t offset = &r - data();
+        assert(offset >= 0 && offset < static_cast<ptrdiff_t>(size()));
+        return static_cast<color_t>(offset);
+    }
+
+    robot & get_robot(color_t c)
+    {
+        uint8_t raw = static_cast<uint8_t>(c);
+        assert(raw < size());
+        return (*this)[raw];
+    }
+
+    robot const & get_robot(color_t c) const
+    {
+        uint8_t raw = static_cast<uint8_t>(c);
+        assert(raw < size());
+        return (*this)[raw];
+    }
+
+    uint32_t raw() const
+    {
+        static_assert(sizeof(*this) == 4);
+        return std::bit_cast<uint32_t>(*this);
+    }
+};
 
 // https://stackoverflow.com/a/7666577/3775803
 static size_t hash(unsigned char const * str, size_t len)
@@ -280,7 +305,7 @@ struct game_state
     robot_array play(robot_array const & robots, move mv) const
     {
         robot_array copy = robots;
-        move_robot(copy, get_robot(copy, mv.robot_color), mv.dir);
+        move_robot(copy, copy.get_robot(mv.robot_color), mv.dir);
         return copy;
     }
 
@@ -302,6 +327,9 @@ struct game_state
     {
         return target_square;
     }
+
+    void save_state(char const * filename, robot_array const & robots);
+    robot_array load_state(char const * filename);
 
 private:
 
@@ -414,8 +442,7 @@ static robot_array init_robots(game_state const & game)
 
     std::unordered_set<position> used_positions;
     for (color_t color : {BLUE, RED, GREEN, YELLOW}) {
-        robot & r = get_robot(robots, color);
-        r.color = color;
+        robot & r = robots.get_robot(color);
         while (true) {
             position pos = random_pos();
             square const & sq = game.get_square(pos);
@@ -474,8 +501,9 @@ static void draw_square_lower(unsigned row, unsigned col,
     });
 
     if (it != robots.end()) {
-        char c = std::toupper(to_char(it->color));
-        int color_code = termcolor(it->color);
+        color_t color = robots.color_of(*it);
+        char c = std::toupper(to_char(color));
+        int color_code = termcolor(color);
         printf("\033[%d;1m%c%c\033[0m", color_code, c, c);
     } else if (sq.target && (*sq.target == target_square || show_all_targets)) {
         int color_code = termcolor(sq.target->color);
@@ -559,10 +587,11 @@ moves_vec game_state::valid_moves(robot_array const & robots) const
 {
     moves_vec vec;
 
-    for (robot const & r : robots) {
+    for (color_t color : {BLUE, RED, GREEN, YELLOW}) {
+        robot const & r = robots.get_robot(color);
         for (direction_t d : {UP, DOWN, LEFT, RIGHT}) {
             if (can_move(robots, r, d)) {
-                vec.emplace_back(r.color, d);
+                vec.emplace_back(color, d);
             }
         }
     }
@@ -572,14 +601,63 @@ moves_vec game_state::valid_moves(robot_array const & robots) const
 
 bool game_state::target_achieved(robot_array const & robots) const
 {
-    for (robot const & r : robots) {
+    for (color_t color : {BLUE, RED, GREEN, YELLOW}) {
+        robot const & r = robots.get_robot(color);
         square const & sq = board[r.row][r.col];
         if (sq.target && *sq.target == target_square &&
-            (sq.target->color == r.color || sq.target->color == RAINBOW)) {
+            (sq.target->color == color || sq.target->color == RAINBOW)) {
             return true;
         }
     }
     return false;
+}
+
+static void do_write(int fd, void const * data, size_t size)
+{
+    ssize_t ret = write(fd, data, size);
+    assert(ret == static_cast<ssize_t>(size));
+}
+
+static void do_read(int fd, void * data, size_t size)
+{
+    ssize_t ret = read(fd, data, size);
+    assert(ret == static_cast<ssize_t>(size));
+}
+
+void game_state::save_state(char const * filename, robot_array const & robots)
+{
+    int fd = open(filename, O_RDWR|O_TRUNC|O_CREAT, S_IRUSR|S_IWUSR);
+    printf("open: %s\n", strerror(errno));
+    assert(fd != -1);
+
+
+    do_write(fd, &robots, sizeof robots);
+    do_write(fd, &target_square, sizeof target_square);
+
+    uint32_t num_targets = all_targets.size();
+    do_write(fd, &num_targets, sizeof num_targets);
+    do_write(fd, all_targets.data(), all_targets.size() * sizeof(target));
+
+    close(fd);
+}
+
+robot_array game_state::load_state(char const * filename)
+{
+    int fd = open(filename, O_RDONLY);
+    assert(fd != -1);
+
+    robot_array robots;
+    do_read(fd, &robots, sizeof robots);
+    do_read(fd, &target_square, sizeof target_square);
+
+    uint32_t num_targets;
+    do_read(fd, &num_targets, sizeof num_targets);
+    all_targets.resize(num_targets);
+    do_read(fd, all_targets.data(), num_targets * sizeof(target));
+
+    close(fd);
+
+    return robots;
 }
 
 // from chatgpt
@@ -676,6 +754,97 @@ struct solutions
     std::vector<moves_vec> options;
 };
 
+struct state_achived
+{
+    robot_array robots;
+    uint8_t moves_used;
+};
+
+struct hash_bucket
+{
+    bool used = false;
+    std::pair<robot_array, uint8_t> kv;
+};
+
+struct states_map
+{
+    using iterator = std::pair<robot_array, uint8_t> *;
+
+    std::pair<iterator, bool> emplace(robot_array const & robots, uint8_t moves_used)
+    {
+        ++probes;
+
+        uint32_t const raw = robots.raw();
+        uint32_t const hash = ::hash((unsigned char *)&raw, 4);
+        for (uint32_t index = hash & mask; ; index = (index + 1) & mask) {
+            hash_bucket & bucket = buckets[index];
+            if (bucket.used) {
+                if (bucket.kv.first.raw() == raw) {
+                    // found
+                    return {&bucket.kv, false};
+                }
+                // hash collision, keep trying
+                ++collisions;
+            } else {
+
+                // not found
+                bucket.used = true;
+                bucket.kv.first = robots;
+                bucket.kv.second = moves_used;
+                ++count;
+
+                if (count < limit) {
+                    return {&bucket.kv, true};
+                }
+                break;
+            }
+            //printf("search index %u raw 0x%x\n", index, raw);
+        }
+
+        return grow(robots);
+    }
+
+    __attribute__((noinline))
+    std::pair<iterator, bool> grow(robot_array const & robots);
+
+    size_t probes = 0;
+    size_t collisions = 0;
+
+    size_t size = 4096;
+    size_t mask = size - 1;
+    size_t count = 0;
+    size_t limit = size/4;
+    std::unique_ptr<hash_bucket[]> buckets = std::make_unique<hash_bucket[]>(size);
+};
+
+__attribute__((noinline))
+std::pair<states_map::iterator, bool> states_map::grow(robot_array const & robots)
+{
+    printf("grow\n");
+
+    size_t old_size = size;
+    size_t new_size = size * 2;
+    assert(std::has_single_bit(new_size));
+    std::unique_ptr<hash_bucket[]> new_buckets = std::make_unique<hash_bucket[]>(new_size);
+    std::swap(buckets, new_buckets);
+    size = new_size;
+    mask = new_size - 1;
+    count = 0;
+    limit = new_size/4;
+
+    std::optional<std::pair<iterator, bool>> ret;
+    for (hash_bucket * b = new_buckets.get(); b < new_buckets.get() + old_size; ++b) {
+        if (b->used) {
+            auto tmp = emplace(b->kv.first, b->kv.second);
+            if (b->kv.first == robots) {
+                assert(!ret);
+                ret = tmp;
+            }
+        }
+    }
+    return ret.value();
+}
+
 static solutions solve_bfs(game_state const & game, robot_array const & robots)
 {
     solutions sols;
@@ -687,7 +856,9 @@ static solutions solve_bfs(game_state const & game, robot_array const & robots)
         return sols;
     }
 
-    std::unordered_map<robot_array, size_t> states_achieved{{robots, 0}};
+    states_map states_achieved;
+    //std::unordered_map<robot_array, uint8_t> states_achieved;
+    states_achieved.emplace(robots, 0);
     std::vector<std::pair<robot_array, moves_vec>> states_to_explore{{robots, {}}};
     std::vector<std::pair<robot_array, moves_vec>> next_states;
 
@@ -695,19 +866,22 @@ static solutions solve_bfs(game_state const & game, robot_array const & robots)
     while (sols.options.empty()) {
         ++moves_used;
 
-        //printf("trying with %zu moves\n", moves_used);
-
+        assert(!states_to_explore.empty());
+        size_t num_moves = 0;
+        size_t new_states = 0;
         for (auto const & [current_robots, moves] : states_to_explore) {
             for (move mv : game.valid_moves(current_robots)) {
+                ++num_moves;
                 robot_array next_robots = game.play(current_robots, mv);
 
                 if (game.target_achieved(next_robots)) {
                     sols.add(moves + mv);
 
-                    //printf("solution of size %zu found\n", solution.size());
-                } else {
+                    printf("solution of size %zu found\n", sols.options.back().size());
+                } else if (sols.options.empty()) {
                     auto [it, did_insert] = states_achieved.emplace(next_robots, moves_used);
                     if (did_insert || it->second > moves_used) {
+                        ++new_states;
                         moves_vec next_moves = moves + mv;
                         it->second = moves_used;
                         next_states.emplace_back(next_robots, next_moves);
@@ -716,9 +890,14 @@ static solutions solve_bfs(game_state const & game, robot_array const & robots)
             }
         }
 
+        printf("explored %zu states, %zu moves, %zu new states found\n",
+               states_to_explore.size(), num_moves, new_states);
+
         std::swap(states_to_explore, next_states);
         next_states.clear();
     }
+
+    printf("%zu probes, %zu collisions\n", states_achieved.probes, states_achieved.collisions);
 
     return sols;
 }
@@ -791,6 +970,8 @@ static void play()
     robot_array robots = init_robots(game);
 
     while (game.select_new_target()) {
+        game.save_state(game_filename, robots);
+
         game.draw(robots);
 
         printf("target is %s %s (%c%c)\n", to_str(game.get_target().color),
@@ -839,9 +1020,24 @@ static void play()
     printf("game over!\n");
 }
 
+static void solve_single()
+{
+    game_state game;
+    robot_array robots = game.load_state(game_filename);
+
+    game.draw(robots);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    solutions sols = solve_bfs(game, robots);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto dur = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    printf("\nsolve with BFS in %lld us\n", dur);
+    //sols.print();
+}
+
 static void usage(char ** argv)
 {
-    fprintf(stderr, "usage: %s [play|test_movement]\n", argv[0]);
+    fprintf(stderr, "usage: %s [play|test_movement|solve_single]\n", argv[0]);
     exit(1);
 }
 
@@ -863,6 +1059,8 @@ int main(int argc, char ** argv)
         test_movement();
     } else if (strcmp(argv[1], "play") == 0) {
         play();
+    } else if (strcmp(argv[1], "solve_single") == 0) {
+        solve_single();
     } else {
         fprintf(stderr, "unknown arg %s\n", argv[1]);
         usage(argv);
